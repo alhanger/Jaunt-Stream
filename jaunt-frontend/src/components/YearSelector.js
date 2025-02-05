@@ -13,6 +13,8 @@ const YearSelector = () => {
   const [selectedYear, setSelectedYear] = useState(null);
   // State for returned shows
   const [shows, setShows] = useState([]);
+  // # of shows to display
+  const[showLimit] = useState(5);
 
   const apiURL = process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000';
 
@@ -118,7 +120,7 @@ const YearSelector = () => {
       </div>
 
       <div className="space-y-4">
-        {shows.map((show) => (
+        {shows.slice(0,showLimit).map((show) => (
           <div
             key={show.id}
             className="bg-gray-800 rounded-lg p-4 hover:bg-gray-700 transition-colors"
