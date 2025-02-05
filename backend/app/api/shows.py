@@ -51,8 +51,11 @@ async def search_shows(
         
     search_results = ia.search_items(query)
     shows = []
+    count = 0
     
     for result in search_results:
+        count += 1
+        print(f"Searching for show #{count}")
         item = ia.get_item(result['identifier'])
         show_data = {
             'id': item.identifier,
