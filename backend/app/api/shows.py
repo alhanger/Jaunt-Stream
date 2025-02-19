@@ -7,31 +7,36 @@ from ..db.session import get_db
 from ..db.models import Show, Song
 from ..core.auth import get_current_user
 from ..services.cache_manager import CacheManager, QueueManager
+from ..services.jauntdb_service import JauntDBService
 import internetarchive as ia
 
 router = APIRouter()
 cache_manager = CacheManager()
 queue_manager = QueueManager()
+db_service = JauntDBService('/Users/alhanger/Documents/Personal/The Jauntee Web App/jauntee-music-stream/jaunt-data/')
 
 @router.get("/years")
 async def get_available_years():
     
     print("Get all available years of shows")
-    #TODO: add collection name as env variable
-    query = "collection:TheJauntee"
-    params = {'fields':'year'}
-    search = ia.search_items(query, params=params)
-    years = set()
+    # #TODO: add collection name as env variable
+    # query = "collection:TheJauntee"
+    # params = {'fields':'year'}
+    # search = ia.search_items(query, params=params)
+    # years = set()
     
-    for result in search:
-        year = result['year']
-        if year in years:
-            next
-        else:
-            years.add(year)
+    # for result in search:
+    #     year = result['year']
+    #     if year in years:
+    #         next
+    #     else:
+    #         years.add(year)
 
-    print(f"Returning years of shows: {sorted(list(years), reverse=True)}")
-    return sorted(list(years), reverse=True)
+    years = db_service.get_years()
+    result = db_service.load_show_data()
+
+    print(f"Returning years of shows: {years}")
+    return years
 
 @router.get("/search")
 async def search_shows(

@@ -5,8 +5,13 @@ import logging
 import json
 from pathlib import Path
 import time
-from typing import Dict, List, Optional
+from typing import Optional
 import os
+import re
+import csv
+
+# TODO: write script to strip location names from venues and add them as separate columns
+# TODO: move DB setup and DB-specific functionality to separate class
 
 class ArchiveScraper:
     def __init__(self, db_dir: str = "data"):
@@ -22,7 +27,7 @@ class ArchiveScraper:
         
         # Set database and log paths
         self.db_path = self.data_dir / "jauntee_archive.db"
-        self.log_path = self.data_dir / "scraper.log"
+        self.log_path = self.data_dir / "track_scraper.log"
         
         self.setup_logging()
         self.setup_database()
@@ -148,11 +153,12 @@ class ArchiveScraper:
 
                 track_number = 1
                 for file in item.get_files():
+                    # File Formats: VBR MP3, Flac, 
                     if file.format == 'VBR MP3':
                         track_data = {
                             'id': f"{show_data['id']}/{file.name}",
                             'show_id': show_data['id'],
-                            'name': self.clean_track_name(file.name),
+                            'name': self.clean_track_name(file.title),
                             'duration': file.length if file.length else None,
                             'size': file.size,
                             'format': file.format,
@@ -188,141 +194,112 @@ class ArchiveScraper:
         conn.close()
         logging.info("Completed show scraping process")
 
-    def get_stats(self):
-        """Get statistics about the scraped data"""
-        conn = sqlite3.connect(self.db_path)
-        c = conn.cursor()
+    def tracks_csv(self):
+        logging.info("Writing tracks to CSV")
+        # Open CSV file with proper headers
+        with open('jauntee_tracks.csv', 'w', newline='', encoding='utf-8') as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=['title'])
+            writer.writeheader()
         
-        stats = {
-            'total_shows': c.execute('SELECT COUNT(*) FROM shows').fetchone()[0],
-            'total_tracks': c.execute('SELECT COUNT(*) FROM tracks').fetchone()[0],
-            'years_covered': c.execute(
-                'SELECT MIN(substr(date,1,4)), MAX(substr(date,1,4)) FROM shows WHERE date IS NOT NULL'
-            ).fetchone(),
-            'total_duration': c.execute('SELECT SUM(duration) FROM tracks WHERE duration IS NOT NULL').fetchone()[0]
-        }
+            query = "collection:TheJauntee"
+            search = ia.search_items(query, params={'rows': 1000})
         
-        conn.close()
-        return stats
+            for result in search:
+                try:
+                    item = ia.get_item(result['identifier'])
+                    
+                    for file in item.get_files():
+                        if hasattr(file, 'title') and (file.format == 'VBR MP3' or file.format == 'Flac'):
+                            logging.info(f"Writing {file.title}")
+                            writer.writerow({
+                                'title': file.title
+                            })
+                        
+                except Exception as e:
+                    print(f"Error processing {result['identifier']}: {str(e)}")
+    
+    def scrape_tracks(self):
+        """Scrape all unique track names and write to DB"""
+        logging.info("Starting track scraping process...")    
 
-    def query_shows_by_year(self, year: int) -> List[Dict]:
-        """Get all shows from a specific year"""
         conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row  # This enables column name access
         c = conn.cursor()
-        
-        shows = c.execute('''
-            SELECT * FROM shows 
-            WHERE date LIKE ?
-            ORDER BY date ASC
-        ''', (f'{year}%',)).fetchall()
-        
-        result = [{key: show[key] for key in show.keys()} for show in shows]
-        conn.close()
-        return result
 
-    def search_tracks(self, song_name: str) -> List[Dict]:
-        """Search for tracks by name"""
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        c = conn.cursor()
-        
-        results = c.execute('''
-            SELECT t.*, s.date, s.venue, s.location
-            FROM tracks t
-            JOIN shows s ON t.show_id = s.id
-            WHERE t.name LIKE ?
-            ORDER BY s.date DESC
-        ''', (f'%{song_name}%',)).fetchall()
-        
-        tracks = [{key: row[key] for key in row.keys()} for row in results]
-        conn.close()
-        return tracks
+        query = "collection:TheJauntee AND year:2011"
+        print(f"Scraping all J-Boy shows")
+        search = ia.search_items(query, params={'rows': 1000})
 
-    def get_show_details(self, show_id: str) -> Dict:
-        """Get detailed information about a specific show including its tracks"""
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        c = conn.cursor()
-        
-        show = c.execute('SELECT * FROM shows WHERE id = ?', (show_id,)).fetchone()
-        if not show:
-            return None
-            
-        tracks = c.execute('''
-            SELECT * FROM tracks 
-            WHERE show_id = ? 
-            ORDER BY track_number
-        ''', (show_id,)).fetchall()
-        
-        result = {
-            'show': {key: show[key] for key in show.keys()},
-            'tracks': [{key: track[key] for key in track.keys()} for track in tracks]
-        }
-        
-        conn.close()
-        return result
+        for result in search:
+            try:
+                item = ia.get_item(result['identifier'])
 
-    def get_venue_stats(self) -> List[Dict]:
-        """Get statistics about performances at different venues"""
-        conn = sqlite3.connect(self.db_path)
-        c = conn.cursor()
-        
-        stats = c.execute('''
-            SELECT 
-                venue,
-                COUNT(*) as show_count,
-                MIN(date) as first_show,
-                MAX(date) as last_show
-            FROM shows
-            WHERE venue IS NOT NULL
-            GROUP BY venue
-            ORDER BY show_count DESC
-        ''').fetchall()
-        
-        result = [{
-            'venue': row[0],
-            'show_count': row[1],
-            'first_show': row[2],
-            'last_show': row[3]
-        } for row in stats]
-        
+                last_track = ''
+                
+                for file in item.get_files():
+                    if hasattr(file, 'title'):
+                        track_lowered = file.title.lower()
+                        track = ArchiveScraper.sanitize_track(file.title)
+                        if (file.format == 'VBR MP3' or file.format == 'Flac') and (track_lowered != last_track):
+                            last_track = track_lowered
+                            track_data = {
+                                'title': track
+                            }
+
+                            c.execute('''
+                                    INSERT OR REPLACE INTO track_titles
+                                    (title)
+                                    VALUES (?)
+                                    ''', (
+                                        track_data['title'],
+                                    ))
+                            
+                            logging.info(f'Processed {track_data['title']}')
+
+                conn.commit()
+                time.sleep(1)
+
+            except Exception as e:
+                logging.error(f"Error processing show {result['identifier']}: {str(e)}")
+                continue
+
         conn.close()
-        return result
+        logging.info("Completed track scraping process")
+    
+    def sanitize_track(title: str) -> str:
+        # Remove arrows
+        title = re.sub(r'\s*->\s*', ' ', title)
+        title = re.sub(r'\s*>\s*', ' ', title)
+    
+        # Remove track numbers at start (e.g., "01. ", "1-", "1 ")
+        title = re.sub(r'^\d+[\s\.-]+', '', title)
+    
+        # Remove show identifier pattern (e.g., "jauntee2011-12-03s2t06")
+        title = re.sub(r'^jauntee\d{4}-\d{2}-\d{2}s\d+t\d+', '', title)
+    
+        # Remove specific characters
+        title = title.replace('_', ' ')
+        title = title.replace('^', '')
+        title = title.replace('*', '')
+        title = title.replace('+', '')
+        title = title.replace('$', '')
+        title = title.replace('-', '')
+        title = title.replace('@', '')
+        title = title.replace('#', '')
+    
+        # Clean up whitespace
+        title = re.sub(r'\s+', ' ', title)
+    
+        return title.strip()
 
 def main():
     # Use a custom data directory
     # data_dir = os.path.join(os.path.expanduser('~'), 'jaunt-data')
     data_dir = "/Users/alhanger/Documents/Personal/The Jauntee Web App/jauntee-music-stream/jaunt-data"
+    db_url = "sqlite:/Users/alhanger/Documents/Personal/The Jauntee Web App/jauntee-music-stream/jaunt-data/jauntee_archive.db"
     scraper = ArchiveScraper(data_dir)
+    scraper.load_show_data(db_url)
     
-    # Scrape data
-    scraper.scrape_shows()
-    
-    # Print statistics
-    stats = scraper.get_stats()
-    logging.info("Scraping completed. Statistics:")
-    logging.info(f"Total shows: {stats['total_shows']}")
-    logging.info(f"Total tracks: {stats['total_tracks']}")
-    logging.info(f"Years covered: {stats['years_covered'][0]} - {stats['years_covered'][1]}")
-    logging.info(f"Total duration: {stats['total_duration']} seconds")
-    
-    # Example queries
-    logging.info("\nExample Queries:")
-    
-    # Get shows from 2023
-    shows_2023 = scraper.query_shows_by_year(2023)
-    logging.info(f"\nShows from 2023: {len(shows_2023)}")
-    
-    # Search for a specific song
-    song_results = scraper.search_tracks("Scarlet Begonias")
-    logging.info(f"\nVersions of Scarlet Begonias: {len(song_results)}")
-    
-    # Get venue statistics
-    venue_stats = scraper.get_venue_stats()
-    logging.info("\nTop venues by show count:")
-    for venue in venue_stats[:5]:
-        logging.info(f"{venue['venue']}: {venue['show_count']} shows")
+    # ArchiveScraper.scrape_shows(scraper)
 
 if __name__ == "__main__":
     main()
